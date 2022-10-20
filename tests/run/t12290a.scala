@@ -1,2 +1,2 @@
-@main def t12290a(): Unit =
+@main def Test(): Unit =
   println("huh")
