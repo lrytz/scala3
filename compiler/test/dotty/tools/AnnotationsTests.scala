@@ -40,7 +40,9 @@ class AnnotationsTest:
           // `Array[String] =:= Array[String]` being false.
           // The reason is that in `TypeComparer.compareAppliedType2` we have
           // `tycon2.typeParams == Nil` after erasure, thus always get false.
-          val res = atPhase(typerPhase) { arrayOfString =:= arg.tpe }
+          val res = atPhase(typerPhase) {
+            arrayOfString =:= arg.tpe
+          }
 
           assert(arg.tpe.isInstanceOf[AppliedType] && res,
             s"Argument $arg had type:\n${arg.tpe}\nbut expected type:\n$arrayOfString")
@@ -94,4 +96,26 @@ class AnnotationsTest:
     inCompilerContext(TestConfiguration.basicClasspath) {
       val term: TermSymbol = requiredClass("java.lang.invoke.MethodHandle").requiredMethod("invokeExact")
       assert(term.hasAnnotation(defn.NativeAnnot), i"${term.annotations}")
+    }
+
+  @Test def namedDefaultAndSubAnnot: Unit =
+    val source =
+      """class ann(x: Int = 1, y: Int = 2) extends annotation.Annotation
+        |class sub(z: Int) extends ann(11, z)
+        |class C:
+        |  val a = 1
+        |  val b = 2
+        |  @ann(y = b) def t1 = 1
+        |  @sub(33) def t3 = 1
+        |""".stripMargin
+    inCompilerContext(TestConfiguration.basicClasspath, separateRun = true, source) {
+      val c = requiredClass("C")
+
+      val t1 = c.requiredMethod("t1")
+      assert(t1.annotations.head.arguments.toString ==
+        "List(Select(Ident(ann),$lessinit$greater$default$1), NamedArg(y,Select(This(Ident(C)),b)))")
+
+      val t3 = c.requiredMethod("t3")
+      assert(t3.annotations.head.arguments.toString ==
+        "List(Literal(Constant(33)))")
     }
