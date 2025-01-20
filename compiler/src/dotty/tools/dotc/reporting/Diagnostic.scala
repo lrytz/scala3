@@ -16,7 +16,8 @@ import core.Decorators.toMessage
 object Diagnostic:
 
   def shouldExplain(dia: Diagnostic)(using Context): Boolean =
-    ctx.settings.explain.value && dia.msg.canExplain
+    ctx.run != null && ctx.run.suppressions.nowarnAction(dia) == Action.Verbose
+    || ctx.settings.explain.value && dia.msg.canExplain
     || ctx.settings.explainTypes.value && dia.msg.isInstanceOf[TypeMismatchMsg]
         // keep old explain-types behavior for backwards compatibility and cross-compilation
 
