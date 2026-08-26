@@ -9,4 +9,5 @@ predefined
 1 a,b
 1 a b
 p-q
+k ab
 null: MatchError
