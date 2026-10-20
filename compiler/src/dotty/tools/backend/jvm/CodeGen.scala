@@ -201,6 +201,15 @@ final class CodeGen(ownerPhase: Phase, gen: BCode, localOpt: Option[LocalOptimiz
     classNode.visitAttribute(dataAttr)
   }
 
+  /**
+   * The ClassBType for a class referenced in emitted bytecode. Code inlined from the classpath can refer
+   * to classes that codegen never needed a ClassBType for, e.g. MethodHandles$Lookup in an invokedynamic
+   * bootstrap handle; with the optimizer enabled, those are loaded from their classfile.
+   */
+  private def referencedClassBType(internalName: InternalName): Option[ClassBType] =
+    gen.classBTypeCache().previouslyConstructedClassBType(internalName)
+      .orElse(bTypesFromClassfile.flatMap(_.classBTypeFromParsedClassfile(internalName).toOption))
+
   private def serializeClassNode(classNode: ClassNode): Array[Byte] = {
     /** Visit the class node and collect all referenced nested classes. */
     def collectNestedClasses(): (Iterable[ClassBType], Iterable[ClassBType]) = {
@@ -209,11 +218,7 @@ final class CodeGen(ownerPhase: Phase, gen: BCode, localOpt: Option[LocalOptimiz
           gen.classBTypeCache().previouslyConstructedClassBType(internalName).get.info.nestedClasses
 
         override def getClassIfNested(internalName: InternalName): Option[ClassBType] =
-          // Code inlined from the classpath can refer to classes that codegen never needed a ClassBType for,
-          // e.g. MethodHandles$Lookup in an invokedynamic bootstrap handle.
-          gen.classBTypeCache().previouslyConstructedClassBType(internalName)
-            .orElse(bTypesFromClassfile.flatMap(_.classBTypeFromParsedClassfile(internalName).toOption))
-            .filter(_.isNestedClass)
+          referencedClassBType(internalName).filter(_.isNestedClass)
       }
       c.visit(classNode)
       (c.declaredInnerClasses, c.referredInnerClasses)
@@ -247,7 +252,7 @@ final class CodeGen(ownerPhase: Phase, gen: BCode, localOpt: Option[LocalOptimiz
     val (declared, referred) = collectNestedClasses()
     addInnerClasses(declared, referred)
     // Finally, convert the class node to bytes
-    val writer = new ClassWriterWithBTypeLub(gen.classBTypeCache())
+    val writer = new ClassWriterWithBTypeLub(referencedClassBType(_).get)
     // Use 10x the default limits, we can encounter very large methods (e.g., in `tests/pos/t10387b.scala`)
     writer.setComputeLimits(100 * 1024 * 1024, 1_000_000_000)
     classNode.accept(writer)
@@ -289,14 +294,12 @@ private final class ClassNodeMetadata(val fullName: String, val isLocal: Boolean
  * http://comments.gmane.org/gmane.comp.java.vm.languages/2293
  * https://github.com/scala/bug/issues/3872
  */
-private final class ClassWriterWithBTypeLub(cache: ClassBType.Cache) extends ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES) {
-  private val objectBType = cache.previouslyConstructedClassBType(ClassBType.javaLangObjectInternalName).get
+private final class ClassWriterWithBTypeLub(classBType: InternalName => ClassBType) extends ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES) {
+  private val objectBType = classBType(ClassBType.javaLangObjectInternalName)
 
   override def getCommonSuperClass(inameA: String, inameB: String): String = {
-    // All types that appear in a class node need to have their ClassBType cached,
-    // i.e., have been loaded either from symbols or from class files.
-    val a = cache.previouslyConstructedClassBType(inameA).get
-    val b = cache.previouslyConstructedClassBType(inameB).get
+    val a = classBType(inameA)
+    val b = classBType(inameB)
     val lub = a.jvmWiseLUB(b, objectBType)
     val lubName = lub.internalName
     assert(lubName != "scala/Any")

@@ -19,7 +19,7 @@ import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 import org.objectweb.asm
 import org.objectweb.asm.Opcodes.*
-import org.objectweb.asm.{Opcodes, Type}
+import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.*
 import org.objectweb.asm.tree.analysis.Value
 import dotty.tools.backend.jvm.BTypes.InternalName
@@ -824,12 +824,7 @@ final class GlobalOptimizer(callGraph: OptimizerCallGraph, classBTypeCache: Clas
               fieldRefClass                   <- bTypesFromClassfile.classBTypeFromParsedClassfile(fi.owner)
               (fieldNode, fieldDeclClassNode) <- byteCodeRepository.fieldNode(fieldRefClass.internalName, fi.name, fi.desc): Either[OptimizerWarning, (FieldNode, InternalName)]
               fieldDeclClass                  <- bTypesFromClassfile.classBTypeFromParsedClassfile(fieldDeclClassNode)
-            } yield {
-              val res = Inliner.memberIsAccessible(fieldNode.access, fieldDeclClass, fieldRefClass, destinationClass)
-              // ensure the result ClassBType is cached (for stack map frame calculation)
-              if (res) bTypesFromClassfile.bTypeForDescriptorFromClassfile(fi.desc)
-              res
-            }
+            } yield Inliner.memberIsAccessible(fieldNode.access, fieldDeclClass, fieldRefClass, destinationClass)
 
       case mi: MethodInsnNode =>
         isInternal(mi.owner) match
@@ -837,8 +832,6 @@ final class GlobalOptimizer(callGraph: OptimizerCallGraph, classBTypeCache: Clas
           case Right(true) => Right(false)
           case Right(false) =>
             if (mi.owner.charAt(0) == '[') {
-              // ensure the result ClassBType is cached (for stack map frame calculation)
-              if (mi.name == "getClass") bTypesFromClassfile.bTypeForDescriptorFromClassfile("Ljava/lang/Class;")
               // array methods are accessible
               Right(true)
             } else {
@@ -858,22 +851,15 @@ final class GlobalOptimizer(callGraph: OptimizerCallGraph, classBTypeCache: Clas
                 methodRefClass                    <- bTypesFromClassfile.classBTypeFromParsedClassfile(mi.owner)
                 (methodNode, methodDeclClassNode) <- byteCodeRepository.methodNode(methodRefClass.internalName, mi.name, mi.desc): Either[OptimizerWarning, (MethodNode, InternalName)]
                 methodDeclClass                   <- bTypesFromClassfile.classBTypeFromParsedClassfile(methodDeclClassNode)
-              } yield {
-                val res = canInlineCall(mi.getOpcode, methodNode.access, methodDeclClass, methodRefClass)
-                // ensure the result ClassBType is cached (for stack map frame calculation)
-                if (res) bTypesFromClassfile.bTypeForDescriptorFromClassfile(Type.getReturnType(mi.desc).getDescriptor)
-                res
-              }
+              } yield canInlineCall(mi.getOpcode, methodNode.access, methodDeclClass, methodRefClass)
             }
 
       case _: InvokeDynamicInsnNode if destinationClass == calleeDeclarationClass =>
-        // Within the same class, any indy instruction can be inlined. Since that class is currently
-        // being emitted, we don't need to worry about caching BTypes (for stack map frame calculation).
-        // The necessary BTypes were cached during code gen.
+        // within the same class, any indy instruction can be inlined
         Right(true)
 
       // does the InvokeDynamicInsnNode call LambdaMetaFactory?
-      case LambdaMetaFactoryCall(indy, _, implMethod, _, _) =>
+      case LambdaMetaFactoryCall(_, _, implMethod, _, _) =>
         // an indy instr points to a "call site specifier" (CSP) [1]
         //  - a reference to a bootstrap method [2]
         //    - bootstrap method name
@@ -923,12 +909,7 @@ final class GlobalOptimizer(callGraph: OptimizerCallGraph, classBTypeCache: Clas
           methodRefClass                    <- bTypesFromClassfile.classBTypeFromParsedClassfile(implMethod.getOwner)
           (methodNode, methodDeclClassNode) <- byteCodeRepository.methodNode(methodRefClass.internalName, implMethod.getName, implMethod.getDesc): Either[OptimizerWarning, (MethodNode, InternalName)]
           methodDeclClass                   <- bTypesFromClassfile.classBTypeFromParsedClassfile(methodDeclClassNode)
-        } yield {
-          val res = Inliner.memberIsAccessible(methodNode.access, methodDeclClass, methodRefClass, destinationClass)
-          // ensure the result ClassBType is cached (for stack map frame calculation)
-          if (res) bTypesFromClassfile.bTypeForDescriptorFromClassfile(Type.getReturnType(indy.desc).getDescriptor)
-          res
-        }
+        } yield Inliner.memberIsAccessible(methodNode.access, methodDeclClass, methodRefClass, destinationClass)
 
       case _: InvokeDynamicInsnNode => Left(UnknownInvokeDynamicInstruction)
 
