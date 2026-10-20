@@ -661,12 +661,20 @@ final case class ClassBType private(internalName: String) extends RefBType {
    */
   private var _info: ClassInfo | Null = null
 
+  /** Set instead of `_info` if computing the info failed. Volatile because `Cache` reads it without locking. */
+  @volatile private var failure: OptimizerWarning | Null = null
+
   def info: ClassInfo = {
     if (_info == null)
       // Another thread may still be initializing this ClassBType, see `Cache.apply`
       this.synchronized {}
-    assert(_info != null, s"ClassBType.info not yet assigned: $this")
+    assert(_info != null, s"ClassBType.info not ${if failure == null then "yet assigned" else s"available ($failure)"}: $this")
     _info.nn
+  }
+
+  private def failureOrSelf: Either[OptimizerWarning, ClassBType] = {
+    val f = failure
+    if f == null then Right(this) else Left(f)
   }
 
   def info_=(i: ClassInfo): Unit = {
@@ -859,12 +867,12 @@ object ClassBType {
      *                     code _may_ reenter into `apply(internalName, ...)` and retrieve the initializing
      *                     `ClassBType`.
      *
-     * @tparam T           The type of the error result.
-     * @return The `ClassBType`
+     * @return The `ClassBType`, or the failure of `init`, which is returned again by later calls. A caller that
+     *         reenters, or races with the initializing thread, may get a `ClassBType` whose initialization then fails.
      */
-    def apply[T](internalName: InternalName)(init: ClassBType => Either[T, ClassInfo]): Either[T, ClassBType] = {
+    def apply(internalName: InternalName)(init: ClassBType => Either[OptimizerWarning, ClassInfo]): Either[OptimizerWarning, ClassBType] = {
       val cached = cache.get(internalName)
-      if cached ne null then Right(cached)
+      if cached ne null then cached.failureOrSelf
       else {
         val newRes = new ClassBType(internalName)
         // synchronized is required to ensure proper initialization of info.
@@ -874,12 +882,16 @@ object ClassBType {
             case null =>
               // We first create and add the ClassBType to the hash map before computing its info. This
               // allows initializing cyclic dependencies, see the comment on variable ClassBType._info.
-              init(newRes).map(ci => {
-                newRes.info = ci
-                newRes
-              })
+              init(newRes) match {
+                case Right(ci) =>
+                  newRes.info = ci
+                  Right(newRes)
+                case Left(w) =>
+                  newRes.failure = w
+                  Left(w)
+              }
             case old =>
-              Right(old)
+              old.failureOrSelf
           }
         }
       }
@@ -891,7 +903,7 @@ object ClassBType {
 
     /** Obtain a previously constructed ClassBType for a given internal name, or None if no such ClassBType was constructed. */
     def previouslyConstructedClassBType(internalName: InternalName): Option[ClassBType] =
-      Option(cache.get(internalName))
+      Option(cache.get(internalName)).filter(_.failure == null)
   }
 }
 
