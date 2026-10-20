@@ -662,6 +662,9 @@ final case class ClassBType private(internalName: String) extends RefBType {
   private var _info: ClassInfo | Null = null
 
   def info: ClassInfo = {
+    if (_info == null)
+      // Another thread may still be initializing this ClassBType, see `Cache.apply`
+      this.synchronized {}
     assert(_info != null, s"ClassBType.info not yet assigned: $this")
     _info.nn
   }
