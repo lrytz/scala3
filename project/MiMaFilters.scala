@@ -259,6 +259,8 @@ object MiMaFilters {
         ProblemFilters.exclude[DirectMissingMethodProblem]("scala.util.Sorting.scala$util$Sorting$$mergeSort$default$5"),
         // `MurmurHash3` is private[scala.util.hashing] so could in theory have been used externally
         ProblemFilters.exclude[DirectMissingMethodProblem]("scala.util.hashing.MurmurHash3.arrayHash(java.lang.Object,Int)Int"),
+        // `ArrayDeque` stores its length instead of an end index; the field was `private[ArrayDeque]`
+        ProblemFilters.exclude[DirectMissingMethodProblem]("scala.collection.mutable.ArrayDeque.end_=(Int)Unit"),
       ),
 
       // Breaking changes since last LTS

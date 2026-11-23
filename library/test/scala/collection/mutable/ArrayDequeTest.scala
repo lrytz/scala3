@@ -102,7 +102,7 @@ class ArrayDequeTest {
   def sliding(): Unit = ArrayDequeTest.genericSlidingTest(ArrayDeque, "ArrayDeque")
 
 
-  class PeekingArrayDeque[C] extends ArrayDeque[C] {
+  class PeekingArrayDeque[C](initialSize: Int = ArrayDeque.DefaultInitialSize) extends ArrayDeque[C](initialSize) {
     def capacity = array.length
   }
 
@@ -111,11 +111,61 @@ class ArrayDequeTest {
     val a = new PeekingArrayDeque().addAll(0 to 255)
 
     a.trimToSize()  // Can't shrink
-    assertEquals(a.capacity, 512)
-    a.remove(0)     // No reallocation because array isn't empty enough
-    assertEquals(a.capacity, 512)
-    a.trimToSize()  // Shrink to 256
-    assertEquals(a.capacity, 256)
+    assertEquals(256, a.capacity)
+    a.remove(0)
+    assertEquals(256, a.capacity)
+    a.trimToSize()
+    assertEquals(255, a.capacity)
+  }
+
+  @Test
+  def fillsArrayCompletely(): Unit = {
+    val a = new PeekingArrayDeque[Int](5)
+    a ++= Seq(2, 3, 4)
+    a.prepend(1).prepend(0) // wraps around the end of the array
+    assertEquals(5, a.capacity)
+    assertEquals(ArrayDeque(0, 1, 2, 3, 4), a)
+    assertEquals(4, a.remove(4))
+    a.insert(1, 10)
+    assertEquals(ArrayDeque(0, 10, 1, 2, 3), a)
+    assertEquals(5, a.capacity)
+    assertEquals(List(0, 10, 1, 2, 3), a.clone().toList)
+    a += 5
+    assertEquals(ArrayDeque(0, 10, 1, 2, 3, 5), a)
+    assertEquals(16, a.capacity)
+  }
+
+  @Test
+  def sameAsArrayBuffer(): Unit = {
+    val rnd = new scala.util.Random(42)
+    for (round <- 0 until 2000) {
+      val d = new PeekingArrayDeque[Int](rnd.nextInt(5))
+      val b = ArrayBuffer.empty[Int]
+      val ops = ArrayBuffer.empty[String]
+      def step(name: String)(f: Buffer[Int] => Any): Unit = {
+        ops += name
+        val expected = f(b)
+        val actual = f(d)
+        assertEquals(s"$name after ${ops.mkString("; ")}", expected, actual)
+        assertEquals(s"after ${ops.mkString("; ")}", b, d)
+        assertTrue(d.length <= d.capacity)
+      }
+      for (_ <- 0 until (if (round % 10 == 0) 600 else 60)) {
+        val n = b.length
+        val x = rnd.nextInt(100)
+        val xs = List.fill(rnd.nextInt(6))(rnd.nextInt(100))
+        rnd.nextInt(12) match {
+          case 0 | 1 | 2 => step(s"+= $x")(_ += x)
+          case 3 | 4 | 5 => step(s"prepend $x")(_.prepend(x))
+          case 6 => val i = rnd.nextInt(n + 1); step(s"insert $i $x")(_.insert(i, x))
+          case 7 => val i = rnd.nextInt(n + 1); step(s"insertAll $i $xs")(_.insertAll(i, if (rnd.nextBoolean()) xs else xs.iterator))
+          case 8 => step(s"prependAll $xs")(_.prependAll(xs))
+          case 9 => step(s"addAll $xs")(_.addAll(if (rnd.nextBoolean()) xs.toVector else xs.iterator))
+          case 10 => if (n > 0) { val i = rnd.nextInt(n); val c = rnd.nextInt(n - i + 1); step(s"remove $i $c")(_.remove(i, c)) }
+          case 11 => if (n > 0) { val r = rnd.nextBoolean(); if (rnd.nextBoolean()) step(s"removeHead $r")(bb => if (bb eq d) d.removeHead(r) else b.remove(0)) else step(s"removeLast $r")(bb => if (bb eq d) d.removeLast(r) else b.remove(n - 1)) }
+        }
+      }
+    }
   }
 
   @Test def `head of empty throws NoSuchElement`: Unit =
