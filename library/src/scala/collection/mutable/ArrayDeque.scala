@@ -72,12 +72,12 @@ class ArrayDeque[A] protected (
   override def stepper[S <: Stepper[?]](implicit shape: StepperShape[A, S]): S & EfficientSplit = super.stepper(using shape)
 
   def apply(idx: Int): A = {
-    requireBounds(idx, len)
+    requireBounds(idx, length)
     _get(idx)
   }
 
   def update(idx: Int, elem: A): Unit = {
-    requireBounds(idx, len)
+    requireBounds(idx, length)
     _set(idx, elem)
   }
 
@@ -109,6 +109,37 @@ class ArrayDeque[A] protected (
 
   override def iterator: Iterator[A] = new ArrayDeque.ArrayDequeIterator(this)
 
+  // Loops over the two parts of `array` separately, to avoid wrapping the index for every element
+  override def foldLeft[B](z: B)(op: (B, A) => B): B = {
+    val arr = array
+    val n = len
+    val first = Math.min(n, arr.length - start)
+    var acc = z
+    var i = start
+    val end1 = start + first
+    while (i < end1) {
+      acc = op(acc, arr(i).asInstanceOf[A])
+      i += 1
+    }
+    i = 0
+    val end2 = n - first
+    while (i < end2) {
+      acc = op(acc, arr(i).asInstanceOf[A])
+      i += 1
+    }
+    acc
+  }
+
+  override def reverseIterator: Iterator[A] = new ArrayDeque.ArrayDequeReverseIterator(this)
+
+  override def sortInPlace[B >: A]()(implicit ord: Ordering[B]): this.type = {
+    if (len > 1) {
+      if (start_+(len - 1) < start) resize(array.length) // Make the elements contiguous
+      scala.util.Sorting.stableSort(array.asInstanceOf[Array[B]], start, start + len)
+    }
+    this
+  }
+
   override def prependAll(elems: IterableOnce[A]^): this.type = {
     val it = elems.iterator
     if (it.nonEmpty) {
@@ -132,11 +163,7 @@ class ArrayDeque[A] protected (
             // Move start back by srcLength and fill the gap
             start = start_-(srcLength)
             len = finalLength
-            var i = 0
-            while (i < srcLength) {
-              _set(i, it.next())
-              i += 1
-            }
+            copyFromIterator(it, 0, srcLength)
           }
       }
     }
@@ -183,20 +210,12 @@ class ArrayDeque[A] protected (
         setArray(array2, finalLength)
       } else if (n <= idx * 2) { // Cheaper to shift the suffix right
         len = finalLength
-        var i = n - 1
-        while(i >= idx) {
-          _set(i + 1, _get(i))
-          i -= 1
-        }
+        moveElems(idx, idx + 1, n - idx)
         _set(idx, elem)
       } else { // Cheaper to shift the prefix left
         start = start_-(1)
         len = finalLength
-        var i = 0
-        while(i < idx) {
-          _set(i, _get(i + 1))
-          i += 1
-        }
+        moveElems(1, 0, idx)
         _set(idx, elem)
       }
     }
@@ -232,28 +251,13 @@ class ArrayDeque[A] protected (
           setArray(array2, finalLength)
         } else if (2*idx >= n) { // Cheaper to shift the suffix right
           len = finalLength
-          var i = n - 1
-          while(i >= idx) {
-            _set(i + srcLength, _get(i))
-            i -= 1
-          }
-          i = idx
-          while(it.hasNext) {
-            _set(i, it.next())
-            i += 1
-          }
+          moveElems(idx, idx + srcLength, n - idx)
+          copyFromIterator(it, idx, srcLength)
         } else {  // Cheaper to shift prefix left
           start = start_-(srcLength)
           len = finalLength
-          var i = 0
-          while(i < idx) {
-            _set(i, _get(i + srcLength))
-            i += 1
-          }
-          while(it.hasNext) {
-            _set(i, it.next())
-            i += 1
-          }
+          moveElems(srcLength, 0, idx)
+          copyFromIterator(it, idx, srcLength)
         }
       }
     }
@@ -274,27 +278,13 @@ class ArrayDeque[A] protected (
         copySliceToArray(srcStart = suffixStart, dest = array2, destStart = idx, maxItems = n)
         setArray(array2, finalLength)
       } else if (2*idx <= finalLength) { // Cheaper to move the prefix right
-        var i = suffixStart - 1
-        while(i >= removals) {
-          _set(i, _get(i - removals))
-          i -= 1
-        }
-        while(i >= 0) {
-          _set(i, null.asInstanceOf[A])
-          i -= 1
-        }
+        moveElems(0, removals, idx)
+        clearSlots(0, removals)
         start = start_+(removals)
         len = finalLength
       } else {  // Cheaper to move the suffix left
-        var i = idx
-        while(i < finalLength) {
-          _set(i, _get(i + removals))
-          i += 1
-        }
-        while(i < n) {
-          _set(i, null.asInstanceOf[A])
-          i += 1
-        }
+        moveElems(suffixStart, idx, n - suffixStart)
+        clearSlots(finalLength, removals)
         len = finalLength
       }
     } else {
@@ -464,12 +454,18 @@ class ArrayDeque[A] protected (
   /** Ensures the internal array can hold at least `hint` elements. */
   def ensureSize(hint: Int): Unit = if (hint > array.length) grow(hint)
 
-  def length = len
+  // Equal to `len`. Bounding it by `array.length` lets the JVM and JS JITs drop array bounds checks
+  // in loops over `0 until length` that call `apply`.
+  def length = Math.min(len, array.length)
 
   override def isEmpty = len == 0
 
-  override protected def klone(): ArrayDeque[A] =
-    new ArrayDeque(copySliceToArray(srcStart = 0, dest = new Array[AnyRef | Null](array.length), destStart = 0, maxItems = len), start = 0, end = len)
+  override protected def klone(): ArrayDeque[A] = {
+    val res = new ArrayDeque[A](array.clone(), start = 0, end = 0)
+    res.start = start
+    res.len = len
+    res
+  }
 
   override def iterableFactory: SeqFactory[ArrayDeque] = ArrayDeque
 
@@ -479,13 +475,7 @@ class ArrayDeque[A] protected (
     */
   def clear(): Unit = {
     if (nonEmpty) {
-      val untilArrayEnd = array.length - start
-      if (len <= untilArrayEnd) {
-        java.util.Arrays.fill(array, start, start + len, null)
-      } else {
-        java.util.Arrays.fill(array, start, array.length, null)
-        java.util.Arrays.fill(array, 0, len - untilArrayEnd, null)
-      }
+      clearSlots(0, len)
       start = 0
       len = 0
     }
@@ -547,6 +537,58 @@ class ArrayDeque[A] protected (
 
   @inline private def _set(idx: Int, elem: A) = array(start_+(idx)) = elem.asInstanceOf[AnyRef]
 
+  // Moves `count` elements from index `from` to index `to`; the ranges may overlap.
+  // Indices are relative to `start` and must stay below `array.length`.
+  @inline private def moveElems(from: Int, to: Int, count: Int): Unit = {
+    val cap = array.length
+    if (count < ArrayDeque.ShortCopy) { // Short moves are faster without `arraycopy`
+      if (to > from) {
+        var i = count - 1
+        while (i >= 0) { _set(to + i, _get(from + i)); i -= 1 }
+      } else {
+        var i = 0
+        while (i < count) { _set(to + i, _get(from + i)); i += 1 }
+      }
+    } else if (to > from) { // Copy back to front, in chunks that do not wrap around in source or destination
+      var n = count
+      while (n > 0) {
+        val src = start_+(from + n - 1)
+        val dst = start_+(to + n - 1)
+        val chunk = Math.min(n, Math.min(src, dst) + 1)
+        System.arraycopy(array, src - chunk + 1, array, dst - chunk + 1, chunk)
+        n -= chunk
+      }
+    } else if (to < from) {
+      var done = 0
+      while (done < count) {
+        val src = start_+(from + done)
+        val dst = start_+(to + done)
+        val chunk = Math.min(count - done, cap - Math.max(src, dst))
+        System.arraycopy(array, src, array, dst, chunk)
+        done += chunk
+      }
+    }
+  }
+
+  // Writes `count` elements of `it` from index `idx` (relative to `start`)
+  private def copyFromIterator(it: Iterator[A]^, idx: Int, count: Int): Unit = {
+    val pos = start_+(idx)
+    val first = Math.min(count, array.length - pos)
+    it.copyToArray(array.asInstanceOf[Array[A]], pos, first)
+    if (first < count) it.copyToArray(array.asInstanceOf[Array[A]], 0, count - first)
+  }
+
+  // Nulls out `count` slots from index `from` (relative to `start`), so that removed elements can be collected
+  @inline private def clearSlots(from: Int, count: Int): Unit = if (count < ArrayDeque.ShortCopy) {
+    var i = 0
+    while (i < count) { array(start_+(from + i)) = null; i += 1 }
+  } else {
+    val pos = start_+(from)
+    val first = Math.min(count, array.length - pos)
+    java.util.Arrays.fill(array, pos, pos + first, null)
+    if (first < count) java.util.Arrays.fill(array, 0, count - first, null)
+  }
+
   private def setArray(array: Array[AnyRef | Null], len: Int): Unit = {
     this.array = array
     this.start = 0
@@ -592,23 +634,30 @@ object ArrayDeque extends StrictOptimizedSeqFactory[ArrayDeque] {
   def empty[A]: ArrayDeque[A] = new ArrayDeque[A]()
 
   // Like `IndexedSeqView`'s iterator, but without the indirection through a view
+  // The iterators walk `array` directly, wrapping their index once rather than for every element
   private final class ArrayDequeIterator[A](self: ArrayDeque[A]) extends AbstractIterator[A] with Serializable {
-    private var current = 0
-    private var remainder = self.length
+    private val arr = self.array
+    private var i = self.start
+    private var remainder = self.len
     override def knownSize: Int = remainder
     def hasNext: Boolean = remainder > 0
     def next(): A =
       if (remainder > 0) {
-        val r = self(current)
-        current += 1
+        val r = arr(i)
+        i += 1
+        if (i == arr.length) i = 0
         remainder -= 1
-        r
+        r.asInstanceOf[A]
       } else Iterator.empty.next()
 
     override def drop(n: Int): Iterator[A]^{this} = {
       if (n > 0) {
-        current += n
-        remainder = Math.max(0, remainder - n)
+        if (n >= remainder) remainder = 0
+        else {
+          remainder -= n
+          i += n
+          if (i - arr.length >= 0) i -= arr.length
+        }
       }
       this
     }
@@ -617,13 +666,44 @@ object ArrayDeque extends StrictOptimizedSeqFactory[ArrayDeque] {
       def formatRange(value: Int): Int = if (value < 0) 0 else if (value > remainder) remainder else value
       val formatFrom = formatRange(from)
       val formatUntil = formatRange(until)
+      drop(formatFrom)
       remainder = Math.max(0, formatUntil - formatFrom)
-      current = current + formatFrom
+      this
+    }
+  }
+
+  private final class ArrayDequeReverseIterator[A](self: ArrayDeque[A]) extends AbstractIterator[A] with Serializable {
+    private val arr = self.array
+    private var remainder = self.len
+    private var i = { val j = self.start + remainder - 1; if (j - arr.length >= 0) j - arr.length else j }
+    override def knownSize: Int = remainder
+    def hasNext: Boolean = remainder > 0
+    def next(): A =
+      if (remainder > 0) {
+        val r = arr(i)
+        i -= 1
+        if (i < 0) i = arr.length - 1
+        remainder -= 1
+        r.asInstanceOf[A]
+      } else Iterator.empty.next()
+
+    override def drop(n: Int): Iterator[A]^{this} = {
+      if (n > 0) {
+        if (n >= remainder) remainder = 0
+        else {
+          remainder -= n
+          i -= n
+          if (i < 0) i += arr.length
+        }
+      }
       this
     }
   }
 
   final val DefaultInitialSize = 16
+
+  // Below this many elements, moving or clearing slots one by one beats `arraycopy` and `fill`
+  private[ArrayDeque] final val ShortCopy = 16
 
   /**
     * We try to not repeatedly resize arrays smaller than this

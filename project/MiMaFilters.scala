@@ -49,6 +49,8 @@ object MiMaFilters {
         ProblemFilters.exclude[MissingTypesProblem]("scala.util.hashing.MurmurHash3$"),
         // MurmurHash3 is now compiled by Scala 3 instead of copied from Scala 2.13, so it has a default value for a method that is no longer final
         ProblemFilters.exclude[FinalMethodProblem]("scala.util.hashing.MurmurHash3.productHash$default$3()Boolean"),
+        // `ArrayDeque` sorts its array in place, like `ArrayBuffer`; the override has a more specific erased result type
+        ProblemFilters.exclude[DirectMissingMethodProblem]("scala.collection.mutable.ArrayDeque.sortInPlace"),
       ) ++ (0 to 22).flatMap { n =>
         // `applyUsing` for arity `n` is defined in the companion object of `FunctionN`,
         // which is a new object for all arities except 1
